@@ -11,6 +11,7 @@ import os
 import requests
 import paho.mqtt.client as mqtt
 from typing import Dict, List, Any
+from pathlib import Path
 
 
 # Configuration
@@ -38,6 +39,7 @@ class Config:
 class VoiceAssistantBridge:
     def __init__(self):
         self.setup_logging()
+        self.load_entities()
         self.setup_mqtt()
 
     def setup_logging(self):
@@ -45,6 +47,61 @@ class VoiceAssistantBridge:
             level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
         )
         self.logger = logging.getLogger(__name__)
+        
+    def load_entities(self):
+        """Load discovered entities from JSON file"""
+        entities_file = Path("ha_entities.json")
+        
+        if entities_file.exists():
+            try:
+                with open(entities_file, 'r') as f:
+                    self.entities = json.load(f)
+                self.logger.info(f"Loaded {sum(len(v) for v in self.entities.values())} entities")
+            except Exception as e:
+                self.logger.error(f"Error loading entities: {e}")
+                self.entities = self.get_default_entities()
+        else:
+            self.logger.warning("No ha_entities.json found, using defaults")
+            self.entities = self.get_default_entities()
+            
+    def get_default_entities(self):
+        """Fallback entity structure if JSON not found"""
+        return {
+            'lights': [],
+            'switches': [],
+            'climate': [],
+            'fans': [],
+            'automations': [],
+            'scripts': [],
+            'media_players': [],
+            'covers': [],
+            'sensors': [],
+            'other': []
+        }
+        
+    def generate_entity_list(self):
+        """Generate entity list for system prompt"""
+        entity_lines = []
+        
+        for light in self.entities.get('lights', []):
+            entity_lines.append(f"- {light['entity_id']} ({light['friendly_name']})")
+            
+        for switch in self.entities.get('switches', []):
+            entity_lines.append(f"- {switch['entity_id']} ({switch['friendly_name']})")
+            
+        for climate in self.entities.get('climate', []):
+            entity_lines.append(f"- {climate['entity_id']} ({climate['friendly_name']})")
+            
+        for fan in self.entities.get('fans', []):
+            entity_lines.append(f"- {fan['entity_id']} ({fan['friendly_name']})")
+            
+        for automation in self.entities.get('automations', []):
+            entity_lines.append(f"- {automation['entity_id']} ({automation['friendly_name']})")
+            
+        for script in self.entities.get('scripts', []):
+            entity_lines.append(f"- {script['entity_id']} ({script['friendly_name']})")
+            
+        return "\n".join(entity_lines)
 
     def setup_mqtt(self):
         """Setup MQTT client and callbacks"""
@@ -116,36 +173,38 @@ class VoiceAssistantBridge:
     def query_llm(self, user_text: str) -> Dict[str, Any]:
         """Send text to LLM and get response"""
 
-        # System prompt for home assistant context
-        system_prompt = """You are a helpful home assistant AI. You can control smart home devices and have natural conversations.
+        # Generate dynamic system prompt with discovered entities
+        entity_list = self.generate_entity_list()
+        
+        system_prompt = f"""You are a helpful home assistant AI. You can control smart home devices and have natural conversations.
 
 Available Home Assistant functions:
 - light_control(entity_id, action, brightness=None): Control lights (action: turn_on, turn_off, toggle)
 - switch_control(entity_id, action): Control switches (action: turn_on, turn_off, toggle)  
 - climate_control(entity_id, temperature=None, mode=None): Control climate
+- automation_control(entity_id, action): Control automations (action: trigger, turn_on, turn_off, toggle)
+- script_control(entity_id, action): Control scripts (action: run, turn_on, turn_off, toggle)
 - create_reminder(text, time): Create reminders
-- get_weather(): Get weather information
 
 When controlling devices, respond with both conversation AND function calls in JSON format:
-{
+{{
   "speech": "Your spoken response",
   "functions": [
-    {"name": "light_control", "parameters": {"entity_id": "light.living_room", "action": "turn_on", "brightness": 80}}
+    {{"name": "light_control", "parameters": {{"entity_id": "light.living_room", "action": "turn_on", "brightness": 80}}}}
   ]
-}
+}}
 
 For regular conversation, just respond normally without functions.
 
 Current available entities:
-- light.living_room
-- light.bedroom  
-- light.kitchen
-- switch.fan
-- climate.main_thermostat
+{entity_list}
 
 Examples:
 User: "Turn on the living room lights"
-Response: {"speech": "Turning on the living room lights", "functions": [{"name": "light_control", "parameters": {"entity_id": "light.living_room", "action": "turn_on"}}]}
+Response: {{"speech": "Turning on the living room lights", "functions": [{{"name": "light_control", "parameters": {{"entity_id": "light.living_room", "action": "turn_on"}}}}]}}
+
+User: "Run the morning routine"
+Response: {{"speech": "Starting your morning routine", "functions": [{{"name": "automation_control", "parameters": {{"entity_id": "automation.morning_routine", "action": "trigger"}}}}]}}
 
 User: "How's it going?"
 Response: "I'm doing well! How can I help you today?"
@@ -214,6 +273,10 @@ Response: "I'm doing well! How can I help you today?"
                 self.control_climate(params)
             elif func_name == "create_reminder":
                 self.create_reminder(params)
+            elif func_name == "automation_control":
+                self.control_automation(params)
+            elif func_name == "script_control":
+                self.control_script(params)
             else:
                 self.logger.warning(f"Unknown function: {func_name}")
 
@@ -270,6 +333,32 @@ Response: "I'm doing well! How can I help you today?"
         # This would integrate with HA calendar or notification system
         self.logger.info(f"Creating reminder: {text} at {time_str}")
         # Implementation depends on your HA setup
+        
+    def control_automation(self, params: Dict[str, Any]):
+        """Control Home Assistant automations"""
+        entity_id = params.get("entity_id")
+        action = params.get("action", "trigger")
+        
+        if action == "trigger":
+            self.call_ha_service("automation", "trigger", {"entity_id": entity_id})
+        elif action == "turn_on":
+            self.call_ha_service("automation", "turn_on", {"entity_id": entity_id})
+        elif action == "turn_off":
+            self.call_ha_service("automation", "turn_off", {"entity_id": entity_id})
+        elif action == "toggle":
+            self.call_ha_service("automation", "toggle", {"entity_id": entity_id})
+            
+    def control_script(self, params: Dict[str, Any]):
+        """Control Home Assistant scripts"""
+        entity_id = params.get("entity_id")
+        action = params.get("action", "run")
+        
+        if action in ["run", "turn_on"]:
+            self.call_ha_service("script", "turn_on", {"entity_id": entity_id})
+        elif action == "turn_off":
+            self.call_ha_service("script", "turn_off", {"entity_id": entity_id})
+        elif action == "toggle":
+            self.call_ha_service("script", "toggle", {"entity_id": entity_id})
 
     def call_ha_service(self, domain: str, service: str, service_data: Dict[str, Any]):
         """Call Home Assistant service via API"""
